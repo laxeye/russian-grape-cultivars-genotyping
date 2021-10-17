@@ -45,6 +45,23 @@ Algorithm for dimensionality reduction: umap (default) or tsne.
 tSNE perplexity parameter.
 
 
+### map-and-call.sh
+
+Bash script for sequencing reads mapping onto reference (12X), 527 SNPs calling and genotypes extraction.
+
+
+### Requirements
+
+* bowtie2
+* samtools
+* bcftools
+* wget
+
+#### Usage
+
+./map-and-call.sh FORWARD_READS REVERSE_READS
+
+
 ## Data and metadata
 
 ### snp.data.tsv and metadata.tsv
