@@ -19,11 +19,12 @@ if [[ ! -f  12x_index.1.bt2 ]]; then
 	bowtie2-build --threads $THREADS -q $REF_12X.head 12x_index && echo "Reference indexed"
 fi
 
-#Map reads, process mapping file, mpileup and call SNPs
+#Map reads, process mapping file with SAMtools
 bowtie2 -x 12x_index -1 $R1 -2 $R2 -p $THREADS 2>$PREFIX.bowtie.err | \
 samtools view -u -F 4 - | \
-samtools sort -@ $THREADS -m 4G -o $PREFIX.bam
+samtools sort -@ $THREADS -m 4G -o $PREFIX.bam && samtools index $PREFIX.bam
 
-bcftools mpileup -f $REF_12X -Q 18 --regions-file $REGIONS $PREFIX.bam --max-depth 500 -O u -o $PREFIX.mpileup.bcf $PREFIX.bam 
+#BCFtools mpileup and call SNPs
+bcftools mpileup -f $REF_12X -Q 18 --regions-file $REGIONS --max-depth 500 -O u -o $PREFIX.mpileup.bcf $PREFIX.bam
 bcftools call -O v -o $PREFIX.calls.vcf -V indels -m $PREFIX.mpileup.bcf
-bcftools query -f '%CHROM %POS  %REF  %ALT [ %TGT]\n' $PREFIX.calls.vcf > $PREFIX.GT.tsv
+bcftools query -f '%CHROM\t%POS\t%REF\t%ALT[\t%TGT]\n' $PREFIX.calls.vcf > $PREFIX.GT.tsv

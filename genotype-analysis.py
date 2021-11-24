@@ -148,10 +148,19 @@ def isOpp(x, y):
 	return 0
 
 
+def isHZ(x, y):
+	if x == 0 or y == 0:
+		return 0
+	else:
+		return 1
+
+
 def countOpposite(a, b):
 	'''Return count of opposing alleles'''
 	idx_not_na = pandas.notna(a) & pandas.notna(b)
-	return sum([isOpp(x, y) for x,y in zip(a[idx_not_na], b[idx_not_na])])
+	opp = sum([isOpp(x, y) for x,y in zip(a[idx_not_na], b[idx_not_na])])
+	hz = sum([isHZ(x, y) for x,y in zip(a[idx_not_na], b[idx_not_na])])
+	return opp, hz
 
 
 def opposite(df):
@@ -159,8 +168,8 @@ def opposite(df):
 	for i in df.index:
 		for j in df.index:
 			if i > j:
-				l.append([i, j, countOpposite(df.loc[i].values, df.loc[j].values)])
-	return pandas.DataFrame.from_records(l, columns=['First','Second','OH']).sort_values('OH')
+				l.append([i, j, *countOpposite(df.loc[i].values, df.loc[j].values)])
+	return pandas.DataFrame.from_records(l, columns=['First','Second','OH', 'loci']).sort_values('OH')
 
 
 def calcOppNA(dfPred, dfOrf):
@@ -198,7 +207,6 @@ def triosFromDuos(dfInt, dfDuo):
 		ops = list(dfDuo[dfDuo['First']==x]['Second'].values) + list(dfDuo[dfDuo['Second']==x]['First'].values)
 		if len(ops) < 2:
 			continue
-		#if args.no_self:
 		testProg = dfInt.loc[x]
 		for y in ops:
 			for z in ops:
@@ -240,7 +248,6 @@ def dendro(args, df):
 	x = x[~np.isnan(x)]
 	dist_sq = squareform(x, checks=True)
 	labels = list(df.columns) + [df.index[-1]]
-	# pandas.DataFrame(dist_sq, columns=labels, index=labels).to_csv(f"{args.prefix}.dist.sq.csv")
 	logger.info("Plotting dendrograms")
 	for method in ("complete", "average", "weighted", "ward"):
 		lm = linkage(x, method=method, optimal_ordering=True)
@@ -264,12 +271,12 @@ def pt_to_plink(a):
 
 
 def create_plink_ped(df):
-	five_col = [0] * 5
 	l = []
 	for i in df.index:
 		out = [z for x in df.loc[i] for z in pt_to_plink(x)]
 		l.append([i] + [0]*4 + out)
-	pandas.DataFrame.from_records(l).to_csv(f"{args.prefix}.ped", sep=' ', header=False)
+	df_ped = pandas.DataFrame.from_records(l)
+	df_ped.to_csv(f"{args.prefix}.ped", sep=' ', header=False)
 
 
 def filter_duo(dfDuo, dfDist):
@@ -368,12 +375,18 @@ def main():
 	
 	snpN = len(dfIntNR.columns)
 	halfsiblingOH = 0.5 * snpN * args.MAF**2 * (1 - args.MAF)**2
-	logger.info("Predicted opposing homozygotes count for halfsiblings: %s", round(halfsiblingOH, 2))
+	logger.info(
+		"Predicted opposing homozygotes count for halfsiblings: %s",
+		round(halfsiblingOH, 2)
+		)
 
 	h = np.histogram(dfOpp[dfOpp['OH'] <= halfsiblingOH]['OH'], bins='auto')
-	# h = np.histogram(dfOpp[dfOpp['OH'] <= halfsiblingOH]['OH'], bins=int(halfsiblingOH))
+	# 'bins' may be set to int(halfsiblingOH)
 	OHthreshold = h[1][np.argmin(h[0])]
-	logger.info("Max opposing homozygotes for putative relatives: %s", round(OHthreshold, 2))
+	logger.info(
+		"Max opposing homozygotes for putative relatives: %s",
+		round(OHthreshold, 2)
+		)
 	dfDuo = dfOpp[dfOpp['OH'] < OHthreshold].copy()
 	dfDuo = filter_duo(dfDuo, dfDist)
 	dfDuo['Orient'] = pandas.NA
@@ -406,8 +419,10 @@ def main():
 				dfDuo.loc[x, 'Orient'] = 'OP'
 	dfDuo.to_csv("%s.grapeID.duo.csv" % args.prefix, index=None)
 
-	# dfTrio = Qtest(dfTrio)
-	# dfTrio.to_csv("%s.grapeID.triosQ.csv" % args.prefix, index=None)
+	if args.qtest:
+		dfTrioQ = Qtest(dfTrio)
+		dfTrioQ.to_csv("%s.grapeID.trios.Qtested.csv" % args.prefix, index=None)
+
 	seaborn.histplot(data=dfTrioGood, x='Gdist', binwidth=0.005)
 	plt.savefig("%s.grapeID.Gdist.hist.png" % args.prefix, dpi=300)
 	plt.close()
@@ -424,7 +439,6 @@ def main():
 		dfAllPP = predictOffs(dfIntNR)
 		dfAllPP.to_csv("%s.grapeID.PPall.GT.csv" % args.prefix)
 		logger.info("Possible progeny calculated and written.")
-		# dfAllPP = pandas.read_csv("%s.grapeID.PPall.GT.csv" % args.prefix)
 
 		# Drop known offsprings
 		dfIntMissingParentage = dfIntNR.drop(labels=dfTrioGood['Offspring'].values, axis='index')
@@ -470,6 +484,8 @@ def parse_args():
 		help='Perfomr tSNE dimensionality scaling.')
 	parser.add_argument('--metadata',
 		help='Metadata for tSNE plot formatting.')
+	parser.add_argument('--qtest', action='store_true',
+		help='Perfomr Qtest (may be inaccurate).')
 
 	args = parser.parse_args()
 
