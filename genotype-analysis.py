@@ -7,6 +7,7 @@ import seaborn
 import sys
 import matplotlib.pyplot as plt
 import numpy as np
+from math import sqrt
 from scipy.spatial.distance import squareform
 from scipy.cluster.hierarchy import dendrogram, linkage
 from sklearn.manifold import TSNE
@@ -15,32 +16,31 @@ from sklearn.manifold import TSNE
 def makeIntSeries(series):
 	logger = logging.getLogger("main")
 	try:
-		nuc = list(set([
-			y for x in set(series.dropna().values) for y in (x[0], x[-1])
-		]).intersection({'A', 'C', 'G', 'T'}))
+		genotypes = set(series.dropna().values)
+		nuc = sorted(list(set([
+			y for x in genotypes for y in (x[0], x[-1])
+		]).intersection({'A', 'C', 'G', 'T'})))
 	except:
 		logger.error("Error with values: %s", set(series.values))
 		raise Exception(set(series.values))
-	if args.gt_separator:
-		d = dict(zip(
-			[f"{x}{args.gt_separator}{y}" for x in nuc for y in nuc],
-			[-1, 0, 0, 1]
-		))
-	else:
-		d = dict(zip(
-			[f"{x}{y}" for x in nuc for y in nuc],
-			[-1, 0, 0, 1]
-		))
+	if len(nuc) > 2:
+		logger.warning('More than two alleles: %s', ' '.join(nuc))
+	d = dict(zip(
+		[f"{x}{y}" for x in nuc for y in nuc],
+		[-1, 0, 0, 1]
+	))
 	return [d.get(x, pandas.NA) for x in series.values]
 
 
 def makeIntDF(df, args):
+	logger = logging.getLogger("main")
+	logger.info('Converting genotypes to integer data.')
 	if args.transpose:
 		dfInt = df.iloc[args.shift:, :].apply(makeIntSeries)
 	else:
 		dfInt = df.iloc[:, args.shift:].apply(makeIntSeries)
 	dfInt.index = list(map(lambda x: x.replace('.', '_'), dfInt.index))
-	dfInt.index = list(map(lambda x: x.replace(' ', '_'), dfInt.index))
+	#dfInt.index = list(map(lambda x: x.replace(' ', '_'), dfInt.index))
 	return dfInt
 
 
@@ -100,7 +100,7 @@ def Qtest(dfTrio):
 		0.426, 0.41, 0.396, 0.384, 0.374, 0.365, 0.356, 0.349, 0.342,
 		0.337, 0.331, 0.326, 0.321, 0.317, 0.312, 0.308, 0.305, 0.301, 0.29
 	]
-	Q95 = {n:q for n,q in zip(range(3,len(q95)+3), q95)}
+	Q95 = {n:q for n, q in zip(range(3, len(q95) + 3), q95)}
 	dfTrio = dfTrio[dfTrio['Gdist'] < 0.2].copy()
 
 	dfTrio['Gdiff'] = [0] + list(dfTrio['Gdist'][1:].values - dfTrio['Gdist'][:-1].values)
@@ -120,15 +120,15 @@ def Qtest(dfTrio):
 		for _ in range(100):
 			thrTest = dfBT.sample(29)['Gdist']
 			Qs.append((thrDist - min(thrTest)) / (thrDist - max(thrTest)))
-		Q = sum(Qs)/len(Qs)
+		Q = sum(Qs) / len(Qs)
 	else:
 		thrTest = dfBT['Gdist']
 		Q = (min(thrTest) - thrDist) / (max(thrTest) - thrDist)
 
 	Qt = Q95[size]
-	print(f"Sample size: {size}. Qt {Qt}, Q-value {round(Q,3)}.")
+	print(f"Sample size: {size}. Qt {Qt}, Q-value {round(Q, 3)}.")
 	if Q < Qt:
-		print("Insignificant threshold for the gap:", round(dfTrio['Gdiff'][maxDiffIdx],3))
+		print("Insignificant threshold for the gap:", round(dfTrio['Gdiff'][maxDiffIdx], 3))
 		return dfTrio
 	else:
 		dfAT = dfTrio[dfTrio['Gdist'] <= thrDist]
@@ -156,73 +156,102 @@ def isHZ(x, y):
 
 
 def countOpposite(a, b):
-	'''Return count of opposing alleles'''
+	'''Return count of opposing homozygotes'''
 	idx_not_na = pandas.notna(a) & pandas.notna(b)
-	opp = sum([isOpp(x, y) for x,y in zip(a[idx_not_na], b[idx_not_na])])
-	hz = sum([isHZ(x, y) for x,y in zip(a[idx_not_na], b[idx_not_na])])
+	opp = sum([isOpp(x, y) for x, y in zip(a[idx_not_na], b[idx_not_na])])
+	hz = sum([isHZ(x, y) for x, y in zip(a[idx_not_na], b[idx_not_na])])
 	return opp, hz
 
 
 def opposite(df):
-	l = []
+	logger = logging.getLogger('main')
+	logger.info('Calculating opposing homozygotes for all possible pairs.')
+	opps = []
 	for i in df.index:
 		for j in df.index:
 			if i > j:
-				l.append([i, j, *countOpposite(df.loc[i].values, df.loc[j].values)])
-	return pandas.DataFrame.from_records(l, columns=['First','Second','OH', 'loci']).sort_values('OH')
+				opps.append([i, j, *countOpposite(df.loc[i].values, df.loc[j].values)])
+	return pandas.DataFrame.from_records(opps, columns=['First', 'Second', 'OH', 'loci']).sort_values('OH')
 
 
 def calcOppNA(dfPred, dfOrf):
-	l = []
+	opps = []
 	for x in dfPred.index:
 		if x.split(".")[1] == x.split(".")[0]:
 			continue
 		for y in dfOrf.index:
 			if y in x.split("."):
 				continue
-			l.append([
+			opps.append([
 				x, y, countOpposite(dfPred.loc[x].values, dfOrf.loc[y].values)
 				])
-	return pandas.DataFrame.from_records(l, columns=['First','Second','OH']).sort_values('OH')
+	return pandas.DataFrame.from_records(opps, columns=['First', 'Second', 'OH']).sort_values('OH')
 
 
-def calcDist(df):
+def IBSDist(df):
 	'''Return IBS distances between all samples as a dataframe'''
-	l = []
+	logger = logging.getLogger('main')
+	logger.info('Calculating IBS distances.')
+	dists = []
 	for x in df.index:
 		a = df.loc[x]
 		for y in df.index:
 			if x > y:
 				b = df.loc[y]
 				nna = pandas.notna(a) & pandas.notna(b)
-				l.append([x, y, sum(abs(a[nna].values - b[nna].values))/ (2 * len(a[nna])) ])
-	return pandas.DataFrame.from_records(l, columns=['First','Second','IBSdist']).sort_values('IBSdist')
+				dists.append([
+					x,
+					y,
+					sum(abs(a[nna].values - b[nna].values)) / (2 * len(a[nna]))
+				])
+	return pandas.DataFrame.from_records(dists, columns=['First', 'Second', 'IBSdist']).sort_values('IBSdist')
+
+
+def NeiDaDist(df):
+	'''Return Nei's Da distances between all samples as a dataframe'''
+	logger = logging.getLogger('main')
+	logger.info('Calculating Nei\'s DA distances.')
+	dists = []
+	for x in df.index:
+		a = df.loc[x]
+		for y in df.index:
+			if x > y:
+				b = df.loc[y]
+				nna = pandas.notna(a) & pandas.notna(b)
+				dists.append([
+					x,
+					y,
+					1 - sum((a[nna] * b[nna]).map(sqrt) + ( (1 - a[nna]) * (1 - b[nna]) ).map(sqrt)) / len(a[nna])
+					])
+	return pandas.DataFrame.from_records(dists, columns=['First', 'Second', 'NeiDa']).sort_values('NeiDa')
 
 
 def triosFromDuos(dfInt, dfDuo):
 	'''Return all possible trios and predicted progeny genoypes'''
+	logger = logging.getLogger('main')
+	logger.info('Predicting parents-offspring trios.')
 	trios = []
 	d = dict()
 	for x in set(dfDuo['First']).union(set(dfDuo['Second'])):
-		ops = list(dfDuo[dfDuo['First']==x]['Second'].values) + list(dfDuo[dfDuo['Second']==x]['First'].values)
+		ops = list(dfDuo[dfDuo['First'] == x]['Second'].values) + list(dfDuo[dfDuo['Second'] == x]['First'].values)
 		if len(ops) < 2:
 			continue
 		testProg = dfInt.loc[x]
 		for y in ops:
 			for z in ops:
-				if y<z or (y==z and not args.no_self):
-					predProg = pandas.Series([predGT(a, b) for a,b in zip(
+				if y < z or (y == z and not args.no_self):
+					predProg = pandas.Series([predGT(a, b) for a, b in zip(
 							dfInt.loc[y].values, dfInt.loc[z].values
 						)],
 						index=testProg.index
 					)
 					nna = predProg.notna() & testProg.notna()
-					dif = [0 if(x == y) else 1 for x,y in zip(
+					diff = sum([0 if(x == y) else 1 for x, y in zip(
 						predProg[nna].values, testProg[nna].values
-					)]
-					snpN = len(dif)
-					dist = sum(dif) / snpN
-					trios.append([x, f"{y}.{z}", y, z, dist, snpN, int(dist*snpN)])
+					)])
+					snpN = len(predProg[nna])
+					dist = diff / snpN
+					trios.append([x, f"{y}.{z}", y, z, dist, snpN, diff])
 					d[f"{y}.{z}"] = predProg
 
 	header = ['Offspring', 'ppID', 'Parent1', 'Parent2', 'Gdist', 'snpN', 'snpDiff']
@@ -246,17 +275,19 @@ def dendro(args, df):
 	logger = logging.getLogger("main")
 	x = df.transpose().to_numpy()
 	x = x[~np.isnan(x)]
-	dist_sq = squareform(x, checks=True)
+	# dist_sq = squareform(x, checks=True)
 	labels = list(df.columns) + [df.index[-1]]
-	logger.info("Plotting dendrograms")
+	logger.info("Plotting dendrograms.")
+	dist = ("IBS", "Nei's genetic")[args.nei_distance]
 	for method in ("complete", "average", "weighted", "ward"):
 		lm = linkage(x, method=method, optimal_ordering=True)
 		fig = plt.figure(figsize=(6, 48), dpi=300)
-		plt.title(f"Hamming-distance dendrogram, {method} clustering")
+		plt.title(f"{dist} distance dendrogram, {method} clustering")
 		dendrogram(lm, orientation='right', labels=labels,
 			distance_sort='descending', show_leaf_counts=True)
 		plt.savefig(f"{args.prefix}.{method}.dendrogram.png", dpi=300, bbox_inches='tight')
 		plt.savefig(f"{args.prefix}.{method}.dendrogram.svg", bbox_inches='tight')
+		plt.close()
 
 
 def pt_to_plink(a):
@@ -271,11 +302,13 @@ def pt_to_plink(a):
 
 
 def create_plink_ped(df):
-	l = []
+	logger = logging.getLogger("main")
+	logger.info('Converting data to PLINK format.')
+	plink_list = []
 	for i in df.index:
 		out = [z for x in df.loc[i] for z in pt_to_plink(x)]
-		l.append([i] + [0]*4 + out)
-	df_ped = pandas.DataFrame.from_records(l)
+		plink_list.append([i] + [0] * 4 + out)
+	df_ped = pandas.DataFrame.from_records(plink_list)
 	df_ped.to_csv(f"{args.prefix}.ped", sep=' ', header=False)
 
 
@@ -286,12 +319,12 @@ def filter_duo(dfDuo, dfDist):
 		dist = dfDist.query('First == @f & Second == @s')['IBSdist'].values
 		if dist < 0.05:
 			idx.append(x)
-	
 	return dfDuo.drop(idx)
+
 
 def tnse_viz(dfDistP):
 	# Set perplexity parameter here:
-	perplexity = 20
+	perplexity = args.perplexity
 
 	x = dfDistP.transpose().to_numpy()
 	x = x[~np.isnan(x)]
@@ -301,21 +334,22 @@ def tnse_viz(dfDistP):
 
 	dfMeta = pandas.read_table(args.metadata)
 	if args.subsample:
-		dfMeta = dfMeta.iloc[0:args.subsample,:]
+		dfMeta = dfMeta.iloc[0:args.subsample, :]
 	label_col, label_style = dfMeta.columns[1:3]
 
-	x_e_pca = TSNE(init='pca', perplexity=perplexity, n_jobs=1).fit_transform(dfSQ.iloc[:,1:])
-	dfTSNE = pandas.DataFrame(x_e_pca, columns=['tsne1','tsne2'])
+	x_e_pca = TSNE(init='pca', perplexity=perplexity, n_jobs=1).fit_transform(dfSQ.iloc[:, 1:])
+	dfTSNE = pandas.DataFrame(x_e_pca, columns=['tsne1', 'tsne2'])
 	dfTSNE['ID'] = labels
 	dfTSNE = dfTSNE.merge(dfMeta, how='inner', on="ID")
 	dfTSNE.to_csv(f"{args.prefix}.tsne.pca.tsv")
 
 	n_colors = len(set(dfTSNE[label_col].values))
-	seaborn.relplot(data=dfTSNE, x='tsne1',y='tsne2', hue=label_col,
-		palette=seaborn.color_palette(palette="Set3",n_colors=n_colors),
+	seaborn.relplot(data=dfTSNE, x='tsne1', y='tsne2', hue=label_col,
+		palette=seaborn.color_palette(palette="tab20", n_colors=n_colors),
 		style=label_style)
 	plt.savefig(f"{args.prefix}.tsne.pca.png", dpi=300)
 	plt.savefig(f"{args.prefix}.tsne.pca.svg")
+	plt.close()
 
 
 def main():
@@ -331,7 +365,10 @@ def main():
 		df = pandas.read_table(args.input, sep=args.separator, index_col=0, header=None)
 
 	if args.subsample:
-		df = df.iloc[0:args.subsample+args.shift,:]
+		df = df.iloc[0:args.subsample + args.shift, :]
+
+	if args.gt_separator:
+		df = df.replace(to_replace=args.gt_separator, value='', regex=True)
 
 	dfInt = makeIntDF(df, args)
 	dfInt.to_csv("%s.grapeID.int.csv" % args.prefix)
@@ -340,17 +377,10 @@ def main():
 		create_plink_ped(dfInt)
 
 	# Calculate IBS distance
-	dfDist = calcDist(dfInt)
-	dfDist.to_csv("%s.grapeID.dist.csv" % args.prefix, index=None)
+	dfDist = IBSDist(dfInt)
+	dfDist.to_csv("%s.grapeID.IBSdist.csv" % args.prefix, index=None)
 	dfDistP = pandas.pivot(dfDist, index='First', columns='Second', values='IBSdist')
-	dfDistP.to_csv("%s.grapeID.dist.pivot.csv" % args.prefix)
-
-	if args.tsne:
-		tnse_viz(dfDistP)
-
-	# Plot dendrogram
-	if args.plot_dendrograms:
-		dendro(args, dfDistP)
+	dfDistP.to_csv("%s.grapeID.IBSdist.pivot.csv" % args.prefix)
 
 	# Find possible duplicates
 	dfDupes = dfDist[dfDist['IBSdist'] < args.dup_threshold]
@@ -362,6 +392,23 @@ def main():
 		logger.info("No duplicates found.")
 		dfIntNR = dfInt
 
+	# Calculate Nei's DA distance
+	if args.nei_distance:
+		dfP = 0.5 - dfInt / 2
+		dfNei = NeiDaDist(dfP)
+		dfNei.to_csv("%s.grapeID.NeiDa.csv" % args.prefix, index=None)
+		dfNeiP = pandas.pivot(dfNei, index='First', columns='Second', values='NeiDa')
+		dfNeiP.to_csv("%s.grapeID.NeiDa.pivot.csv" % args.prefix)
+	else:
+		dfNeiP = None
+
+	if args.tsne:
+		tnse_viz((dfDistP, dfNeiP)[args.nei_distance])
+
+	# Plot dendrograms
+	if args.plot_dendrograms:
+		dendro(args, (dfDistP, dfNeiP)[args.nei_distance])
+
 	# Calculate IBD / opposing homozygotes
 	dfOpp = opposite(dfIntNR)
 	dfOpp.to_csv("%s.grapeID.OH.csv" % args.prefix, index=None)
@@ -371,10 +418,10 @@ def main():
 
 	# Calculate mean MAF if not specified by user
 	if not args.MAF:
-		args.MAF = np.mean((-abs(dfIntNR.mean())+1)/2)
-	
+		args.MAF = np.mean((1 - abs(dfIntNR.mean())) / 2)
+
 	snpN = len(dfIntNR.columns)
-	halfsiblingOH = 0.5 * snpN * args.MAF**2 * (1 - args.MAF)**2
+	halfsiblingOH = 0.5 * snpN * args.MAF ** 2 * (1 - args.MAF) ** 2
 	logger.info(
 		"Predicted opposing homozygotes count for halfsiblings: %s",
 		round(halfsiblingOH, 2)
@@ -400,22 +447,24 @@ def main():
 	dfTrioGood = dfTrioGood.drop_duplicates(subset=['Offspring'], keep='first')
 	dfTrioGood.to_csv("%s.grapeID.trios.good.csv" % args.prefix, index=None)
 
-	'''Try to orient duo when both parents are known. May cause erros with siblings.'''
+	'''Try to orient duo when both parents are known.
+	May cause erros with siblings, close lineages or clones.
+	'''
 	for x in dfDuo.index:
 		a, b = dfDuo.loc[x].values[:2]
 		if a in dfTrioGood['Offspring'].values:
-			if b in dfTrioGood.query('Offspring == @a')[['Parent1','Parent2']].values:
-				#print(f"Known offspring {a} and parent {b}")
+			if b in dfTrioGood.query('Offspring == @a')[['Parent1', 'Parent2']].values:
+				# Offspring {a} and parent {b}
 				dfDuo.loc[x, 'Orient'] = 'OP'
 			else:
-				#print(f"Known offspring {a} and it's offspring {b}")
+				# Parent {a} and offspring {b}
 				dfDuo.loc[x, 'Orient'] = 'PO'
 		elif b in dfTrioGood['Offspring'].values:
-			if a in dfTrioGood.query('Offspring == @b')[['Parent1','Parent2']].values:
-				#print(f"Known offspring {b} and parent {a}")
+			if a in dfTrioGood.query('Offspring == @b')[['Parent1', 'Parent2']].values:
+				# Offspring {b} and parent {a}
 				dfDuo.loc[x, 'Orient'] = 'PO'
 			else:
-				#print(f"Known offspring {b} and it's offspring {a}")
+				# Parent {b} and offspring {a}
 				dfDuo.loc[x, 'Orient'] = 'OP'
 	dfDuo.to_csv("%s.grapeID.duo.csv" % args.prefix, index=None)
 
@@ -423,15 +472,17 @@ def main():
 		dfTrioQ = Qtest(dfTrio)
 		dfTrioQ.to_csv("%s.grapeID.trios.Qtested.csv" % args.prefix, index=None)
 
+	'''Not really useful plots
+
 	seaborn.histplot(data=dfTrioGood, x='Gdist', binwidth=0.005)
 	plt.savefig("%s.grapeID.Gdist.hist.png" % args.prefix, dpi=300)
 	plt.close()
 	seaborn.histplot(data=dfTrioGood, x='Gdiff')
 	plt.savefig("%s.grapeID.Gdiff.hist.png" % args.prefix, dpi=300)
 	plt.close()
-	seaborn.relplot(data=dfTrioGood, x='Gdist',y='snpN', hue='snpDiff')
+	seaborn.relplot(data=dfTrioGood, x='Gdist', y='snpN', hue='snpDiff')
 	plt.savefig("%s.grapeID.Gdist.rel.png" % args.prefix, dpi=300)
-
+	'''
 
 	if args.predict:
 		# Predict all possible progeny
@@ -441,13 +492,16 @@ def main():
 		logger.info("Possible progeny calculated and written.")
 
 		# Drop known offsprings
-		dfIntMissingParentage = dfIntNR.drop(labels=dfTrioGood['Offspring'].values, axis='index')
+		dfIntMissingParentage = dfIntNR.drop(
+			labels=dfTrioGood['Offspring'].values, axis='index'
+			)
 
-		#Calculate OH between predicted progeny and orphans
+		# Calculate OH between predicted progeny and orphans
 		logger.info("Calculating OH between predicted progeny and orphans.")
 		dfOpp2 = calcOppNA(dfAllPP, dfIntMissingParentage)
-		dfOpp2[dfOpp2['OH'] <= 5].to_csv("%s.grapeID.OH.withPredicted.csv" % args.prefix, index=None)
-
+		dfOpp2[dfOpp2['OH'] <= 5].to_csv(
+			"%s.grapeID.OH.withPredicted.csv" % args.prefix, index=None
+			)
 
 	logger.info("Analysis finished.")
 
@@ -461,9 +515,10 @@ def parse_args():
 	parser.add_argument('--no-self', action='store_true',
 		help='Do not produce offspring from identical parents.')
 	parser.add_argument('--transpose', action='store_true',
-		help='To transpose the initial data.')
+		help='To transpose initial data.')
 	parser.add_argument('--MAF', type=float, default=0.45,
-		help='Average MAF of the SNP set for opposing allele counts estimations.')
+		help='Average MAF of the SNP set for '
+		+ 'opposing homozygotes counts estimations.')
 	parser.add_argument('--gt-separator',
 		help='Symbol separating alleles in genotype, none by default.')
 	parser.add_argument('--separator', default='\t',
@@ -479,13 +534,17 @@ def parse_args():
 	parser.add_argument('-p', '--prefix',
 		help='Output prefix.')
 	parser.add_argument('--dup-threshold', type=float, default=0.005,
-		help='Threshold for duplicate removal.')
+		help='Threshold for duplicate removal, default 0.005 (0.5%).')
 	parser.add_argument('--tsne', action='store_true',
 		help='Perfomr tSNE dimensionality scaling.')
-	parser.add_argument('--metadata',
+	parser.add_argument('-m', '--metadata',
 		help='Metadata for tSNE plot formatting.')
 	parser.add_argument('--qtest', action='store_true',
-		help='Perfomr Qtest (may be inaccurate).')
+		help='Perform Qtest (may be inaccurate).')
+	parser.add_argument('--nei-distance', action='store_true',
+		help='Use Nei\'s DA distance for tSNE and dendrograms.')
+	parser.add_argument('--perplexity', default=20, type=int,
+		help='tSNE perplexity, default: 20.')
 
 	args = parser.parse_args()
 
