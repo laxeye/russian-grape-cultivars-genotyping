@@ -281,7 +281,7 @@ def dendro(args, df):
 	dist = ("IBS", "Nei's genetic")[args.nei_distance]
 	for method in ("complete", "average", "weighted", "ward"):
 		lm = linkage(x, method=method, optimal_ordering=True)
-		fig = plt.figure(figsize=(6, 48), dpi=300)
+		fig = plt.figure(figsize=(6, args.ratio * 6), dpi=300)
 		plt.title(f"{dist} distance dendrogram, {method} clustering")
 		dendrogram(lm, orientation='right', labels=labels,
 			distance_sort='descending', show_leaf_counts=True)
@@ -411,6 +411,8 @@ def main():
 
 	# Calculate IBD / opposing homozygotes
 	dfOpp = opposite(dfIntNR)
+	dfOpp['Err_rate'] = dfOpp['OH']/dfOpp['loci']
+	dfOpp = dfOpp.sort_values('Err_rate')
 	dfOpp.to_csv("%s.grapeID.OH.csv" % args.prefix, index=None)
 	seaborn.histplot(data=dfOpp, x='OH', binwidth=1)
 	plt.savefig("%s.grapeID.OH.hist.png" % args.prefix, dpi=300)
@@ -427,7 +429,7 @@ def main():
 		round(halfsiblingOH, 2)
 		)
 
-	h = np.histogram(dfOpp[dfOpp['OH'] <= halfsiblingOH]['OH'], bins='auto')
+	h = np.histogram(dfOpp[dfOpp['OH'] <= halfsiblingOH * 2]['OH'], bins='auto')
 	# 'bins' may be set to int(halfsiblingOH)
 	OHthreshold = h[1][np.argmin(h[0])]
 	logger.info(
@@ -533,10 +535,10 @@ def parse_args():
 		help='Plot dendrograms.')
 	parser.add_argument('-p', '--prefix',
 		help='Output prefix.')
-	parser.add_argument('--dup-threshold', type=float, default=0.005,
-		help='Threshold for duplicate removal, default 0.005 (0.5%).')
+	parser.add_argument('--dup-threshold', type=float, default=0.01,
+		help='Threshold for duplicate removal, default 0.01.')
 	parser.add_argument('--tsne', action='store_true',
-		help='Perfomr tSNE dimensionality scaling.')
+		help='Perform tSNE dimensionality scaling.')
 	parser.add_argument('-m', '--metadata',
 		help='Metadata for tSNE plot formatting.')
 	parser.add_argument('--qtest', action='store_true',
@@ -545,6 +547,8 @@ def parse_args():
 		help='Use Nei\'s DA distance for tSNE and dendrograms.')
 	parser.add_argument('--perplexity', default=20, type=int,
 		help='tSNE perplexity, default: 20.')
+	parser.add_argument('--ratio', type=float, default=8,
+		help='Denrogram ration Height:Width. Default 8.')
 
 	args = parser.parse_args()
 
