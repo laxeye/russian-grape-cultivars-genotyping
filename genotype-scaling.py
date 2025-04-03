@@ -21,6 +21,8 @@ def parse_args():
 		+ "table with coordinates in lower dimensional space.")
 	parser.add_argument("-i", "--input", required=True,
 		help="Genotype in tab-separated table.")
+	parser.add_argument('-d', '--is_distance', action='store_true',
+		help='Calculated IBS distances in input.')
 	parser.add_argument("-m", "--metadata",
 		help="Tab-separated metadata for genotypes, if available. "
 		+ "First column contains identifiers and should match " 
@@ -78,11 +80,14 @@ def calcDist(df):
 
 def main(args):
 	'''Read genotypes from tab-separated table to pandas dataframe'''
-	df = pandas.read_table(args.input, index_col=0).T
-	dfInt = df.iloc[args.shift:, :].apply(makeIntSeries)
+	if not args.is_distance:
+		df = pandas.read_table(args.input, index_col=0).T
+		dfInt = df.iloc[args.shift:, :].apply(makeIntSeries)
 
-	''' Create square matrix of IBS distances '''
-	dfDist = calcDist(dfInt)
+		''' Create square matrix of IBS distances '''
+		dfDist = calcDist(dfInt)
+	else:
+		dfDist = pandas.read_csv(args.input)
 	dfDist = pandas.pivot(dfDist, index='First', columns='Second', values='IBSdist')
 	x = dfDist.transpose().to_numpy()
 	x = x[~np.isnan(x)]
@@ -126,11 +131,11 @@ def main(args):
 		dfTSNE.to_csv("grape.tsne.pca.tsv")
 		if use_styles:
 			relplot(data=dfTSNE, x='tsne1',y='tsne2', hue=color_col_name,
-				palette=color_palette(palette="Set3",n_colors=color_count),
+				palette=color_palette(palette="Set2",n_colors=color_count),
 				style=style_col_name)
 		else:
 			relplot(data=dfTSNE, x='tsne1',y='tsne2', hue=color_col_name,
-				palette=color_palette(palette="Set3",n_colors=color_count))
+				palette=color_palette(palette="Set2",n_colors=color_count))
 
 	'''Save images'''
 	pyplot.savefig(f"grape.{args.algo}.png", dpi=300)

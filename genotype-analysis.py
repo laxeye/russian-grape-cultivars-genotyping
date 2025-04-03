@@ -140,38 +140,35 @@ def Qtest(dfTrio):
 	return dfTrio
 
 
-def isOpp(x, y):
-	if x == -1 and y == 1:
-		return 1
-	if x == 1 and y == -1:
-		return 1
-	return 0
-
-
-def isHZ(x, y):
-	if x == 0 or y == 0:
-		return 0
-	else:
-		return 1
-
-
 def countOpposite(a, b):
-	'''Return count of opposing homozygotes'''
+	'''Return count of opposing homozygotes and homozygotes'''
 	idx_not_na = pandas.notna(a) & pandas.notna(b)
-	opp = sum([isOpp(x, y) for x, y in zip(a[idx_not_na], b[idx_not_na])])
-	hz = sum([isHZ(x, y) for x, y in zip(a[idx_not_na], b[idx_not_na])])
-	return opp, hz
+	mult = a[idx_not_na] * b[idx_not_na]
+	mult_vc = mult.value_counts()
+	ophz = mult_vc.get(-1, 0)  # count 1 * -1
+	hz = ophz + mult_vc[1]  # add up counts 1 * 1 and -1 * -1
+	return ophz, hz
 
 
-def opposite(df):
+def opposite(dfInt, dfDist, min_dist=0.05, min_loci=20):
+	def check_dist(a, b):
+		return dfDist.query('First == @a & Second == @b')['IBSdist'].values[0]
+
 	logger = logging.getLogger('main')
 	logger.info('Calculating opposing homozygotes for all possible pairs.')
 	opps = []
-	for i in df.index:
-		for j in df.index:
+	for i in dfInt.index:
+		for j in dfInt.index:
 			if i > j:
-				opps.append([i, j, *countOpposite(df.loc[i].values, df.loc[j].values)])
-	return pandas.DataFrame.from_records(opps, columns=['First', 'Second', 'OH', 'loci']).sort_values('OH')
+				if check_dist(i, j) > min_dist:
+					ophz, hz = countOpposite(dfInt.loc[i], dfInt.loc[j])
+					if hz > min_loci:
+						opps.append([i, j, ophz, hz])
+				else:
+					logger.debug(f"{i} and {j} are too close, skipping.")
+	return pandas.DataFrame.from_records(
+		opps, columns=['First', 'Second', 'OH', 'loci']
+		).sort_values('OH')
 
 
 def calcOppNA(dfPred, dfOrf):
@@ -246,13 +243,14 @@ def triosFromDuos(dfInt, dfDuo):
 						index=testProg.index
 					)
 					nna = predProg.notna() & testProg.notna()
-					diff = sum([0 if(x == y) else 1 for x, y in zip(
+					diff = sum([0 if(a == b) else 1 for a, b in zip(
 						predProg[nna].values, testProg[nna].values
 					)])
 					snpN = len(predProg[nna])
-					dist = diff / snpN
-					trios.append([x, f"{y}.{z}", y, z, dist, snpN, diff])
-					d[f"{y}.{z}"] = predProg
+					if snpN > 0:
+						dist = diff / snpN
+						trios.append([x, f"{y}.{z}", y, z, dist, snpN, diff])
+						d[f"{y}.{z}"] = predProg
 
 	header = ['Offspring', 'ppID', 'Parent1', 'Parent2', 'Gdist', 'snpN', 'snpDiff']
 	dfTrios = pandas.DataFrame.from_records(trios, columns=header)
@@ -285,8 +283,8 @@ def dendro(args, df):
 		plt.title(f"{dist} distance dendrogram, {method} clustering")
 		dendrogram(lm, orientation='right', labels=labels,
 			distance_sort='descending', show_leaf_counts=True)
-		plt.savefig(f"{args.prefix}.{method}.dendrogram.png", dpi=300, bbox_inches='tight')
-		plt.savefig(f"{args.prefix}.{method}.dendrogram.svg", bbox_inches='tight')
+		plt.savefig(f"{args.prefix}.dendrogram.{method}.png", dpi=300, bbox_inches='tight')
+		plt.savefig(f"{args.prefix}.dendrogram.{method}.svg", bbox_inches='tight')
 		plt.close()
 
 
@@ -371,21 +369,21 @@ def main():
 		df = df.replace(to_replace=args.gt_separator, value='', regex=True)
 
 	dfInt = makeIntDF(df, args)
-	dfInt.to_csv("%s.grapeID.int.csv" % args.prefix)
+	dfInt.to_csv("%s.int.csv" % args.prefix)
 
 	if args.create_plink:
 		create_plink_ped(dfInt)
 
 	# Calculate IBS distance
 	dfDist = IBSDist(dfInt)
-	dfDist.to_csv("%s.grapeID.IBSdist.csv" % args.prefix, index=None)
+	dfDist.to_csv("%s.IBSdist.csv" % args.prefix, index=None)
 	dfDistP = pandas.pivot(dfDist, index='First', columns='Second', values='IBSdist')
-	dfDistP.to_csv("%s.grapeID.IBSdist.pivot.csv" % args.prefix)
+	dfDistP.to_csv("%s.IBSdist.pivot.csv" % args.prefix)
 
 	# Find possible duplicates
 	dfDupes = dfDist[dfDist['IBSdist'] < args.dup_threshold]
 	if len(dfDupes) > 0:
-		dfDupes.to_csv("%s.grapeID.duplicates.csv" % args.prefix, index=None)
+		dfDupes.to_csv("%s.duplicates.csv" % args.prefix, index=None)
 		logger.info("%s duplicates found.", len(dfDupes))
 		dfIntNR = dfInt.drop(labels=dfDupes['First'])
 	else:
@@ -396,9 +394,9 @@ def main():
 	if args.nei_distance:
 		dfP = 0.5 - dfInt / 2
 		dfNei = NeiDaDist(dfP)
-		dfNei.to_csv("%s.grapeID.NeiDa.csv" % args.prefix, index=None)
+		dfNei.to_csv("%s.NeiDa.csv" % args.prefix, index=None)
 		dfNeiP = pandas.pivot(dfNei, index='First', columns='Second', values='NeiDa')
-		dfNeiP.to_csv("%s.grapeID.NeiDa.pivot.csv" % args.prefix)
+		dfNeiP.to_csv("%s.NeiDa.pivot.csv" % args.prefix)
 	else:
 		dfNeiP = None
 
@@ -410,17 +408,21 @@ def main():
 		dendro(args, (dfDistP, dfNeiP)[args.nei_distance])
 
 	# Calculate IBD / opposing homozygotes
-	dfOpp = opposite(dfIntNR)
+	dfOpp = opposite(dfIntNR, dfDist)
 	dfOpp['Err_rate'] = dfOpp['OH']/dfOpp['loci']
 	dfOpp = dfOpp.sort_values('Err_rate')
-	dfOpp.to_csv("%s.grapeID.OH.csv" % args.prefix, index=None)
+	dfOpp.to_csv("%s.OH.csv" % args.prefix, index=None)
 	seaborn.histplot(data=dfOpp, x='OH', binwidth=1)
-	plt.savefig("%s.grapeID.OH.hist.png" % args.prefix, dpi=300)
+	plt.savefig("%s.OH.hist.png" % args.prefix, dpi=300)
 	plt.close()
 
 	# Calculate mean MAF if not specified by user
-	if not args.MAF:
+	if args.compute_MAF:
 		args.MAF = np.mean((1 - abs(dfIntNR.mean())) / 2)
+		logger.info(
+		"Minor allele frequency (MAF): %s",
+		round(args.MAF, 2)
+		)
 
 	snpN = len(dfIntNR.columns)
 	halfsiblingOH = 0.5 * snpN * args.MAF ** 2 * (1 - args.MAF) ** 2
@@ -436,61 +438,51 @@ def main():
 		"Max opposing homozygotes for putative relatives: %s",
 		round(OHthreshold, 2)
 		)
-	dfDuo = dfOpp[dfOpp['OH'] < OHthreshold].copy()
+	dfDuo = dfOpp.query('OH <= @OHthreshold').copy()
 	dfDuo = filter_duo(dfDuo, dfDist)
 	dfDuo['Orient'] = pandas.NA
 	logger.info("Parent-Offspring pairs found: %s", len(dfDuo))
 
-	dfTrio, dfPPGT = triosFromDuos(dfIntNR, dfDuo)
-	shortHeader = ['Offspring', 'Parent1', 'Parent2', 'Gdist', 'snpN', 'snpDiff']
-	dfTrio[shortHeader].to_csv("%s.grapeID.trios.all.csv" % args.prefix, index=None)
-	dfPPGT.to_csv("%s.grapeID.PP.GT.csv" % args.prefix)
-	dfTrioGood = getTriosAboveGap(dfTrio[shortHeader])
-	dfTrioGood = dfTrioGood.drop_duplicates(subset=['Offspring'], keep='first')
-	dfTrioGood.to_csv("%s.grapeID.trios.good.csv" % args.prefix, index=None)
+	if len(dfDuo.index) > 1:
+		dfTrio, dfPPGT = triosFromDuos(dfIntNR, dfDuo)
+		dfTrio = dfTrio.drop_duplicates(subset=['Offspring'], keep='first')
+		shortHeader = ['Offspring', 'Parent1', 'Parent2', 'Gdist', 'snpN', 'snpDiff']
+		dfTrio[shortHeader].to_csv("%s.trios.all.csv" % args.prefix, index=None)
+		dfPPGT.to_csv("%s.PP.GT.csv" % args.prefix)
+		dfTrioGood = getTriosAboveGap(dfTrio[shortHeader])
+		dfTrioGood.to_csv("%s.trios.good.csv" % args.prefix, index=None)
 
-	'''Try to orient duo when both parents are known.
-	May cause erros with siblings, close lineages or clones.
-	'''
-	for x in dfDuo.index:
-		a, b = dfDuo.loc[x].values[:2]
-		if a in dfTrioGood['Offspring'].values:
-			if b in dfTrioGood.query('Offspring == @a')[['Parent1', 'Parent2']].values:
-				# Offspring {a} and parent {b}
-				dfDuo.loc[x, 'Orient'] = 'OP'
-			else:
-				# Parent {a} and offspring {b}
-				dfDuo.loc[x, 'Orient'] = 'PO'
-		elif b in dfTrioGood['Offspring'].values:
-			if a in dfTrioGood.query('Offspring == @b')[['Parent1', 'Parent2']].values:
-				# Offspring {b} and parent {a}
-				dfDuo.loc[x, 'Orient'] = 'PO'
-			else:
-				# Parent {b} and offspring {a}
-				dfDuo.loc[x, 'Orient'] = 'OP'
-	dfDuo.to_csv("%s.grapeID.duo.csv" % args.prefix, index=None)
+		'''Try to orient duo when both parents are known.
+		May cause erros with siblings, close lineages or clones.
+		'''
+		for x in dfDuo.index:
+			a, b = dfDuo.loc[x].values[:2]
+			if a in dfTrioGood['Offspring'].values:
+				if b in dfTrioGood.query('Offspring == @a')[['Parent1', 'Parent2']].values:
+					# Offspring {a} and parent {b}
+					dfDuo.loc[x, 'Orient'] = 'OP'
+				else:
+					# Parent {a} and offspring {b}
+					dfDuo.loc[x, 'Orient'] = 'PO'
+			elif b in dfTrioGood['Offspring'].values:
+				if a in dfTrioGood.query('Offspring == @b')[['Parent1', 'Parent2']].values:
+					# Offspring {b} and parent {a}
+					dfDuo.loc[x, 'Orient'] = 'PO'
+				else:
+					# Parent {b} and offspring {a}
+					dfDuo.loc[x, 'Orient'] = 'OP'
+
+	dfDuo.to_csv("%s.duo.csv" % args.prefix, index=None)
 
 	if args.qtest:
 		dfTrioQ = Qtest(dfTrio)
-		dfTrioQ.to_csv("%s.grapeID.trios.Qtested.csv" % args.prefix, index=None)
-
-	'''Not really useful plots
-
-	seaborn.histplot(data=dfTrioGood, x='Gdist', binwidth=0.005)
-	plt.savefig("%s.grapeID.Gdist.hist.png" % args.prefix, dpi=300)
-	plt.close()
-	seaborn.histplot(data=dfTrioGood, x='Gdiff')
-	plt.savefig("%s.grapeID.Gdiff.hist.png" % args.prefix, dpi=300)
-	plt.close()
-	seaborn.relplot(data=dfTrioGood, x='Gdist', y='snpN', hue='snpDiff')
-	plt.savefig("%s.grapeID.Gdist.rel.png" % args.prefix, dpi=300)
-	'''
+		dfTrioQ.to_csv("%s.trios.Qtested.csv" % args.prefix, index=None)
 
 	if args.predict:
 		# Predict all possible progeny
 		logger.info("Calculating all possible progeny")
 		dfAllPP = predictOffs(dfIntNR)
-		dfAllPP.to_csv("%s.grapeID.PPall.GT.csv" % args.prefix)
+		dfAllPP.to_csv("%s.PPall.GT.csv" % args.prefix)
 		logger.info("Possible progeny calculated and written.")
 
 		# Drop known offsprings
@@ -502,7 +494,7 @@ def main():
 		logger.info("Calculating OH between predicted progeny and orphans.")
 		dfOpp2 = calcOppNA(dfAllPP, dfIntMissingParentage)
 		dfOpp2[dfOpp2['OH'] <= 5].to_csv(
-			"%s.grapeID.OH.withPredicted.csv" % args.prefix, index=None
+			"%s.OH.withPredicted.csv" % args.prefix, index=None
 			)
 
 	logger.info("Analysis finished.")
@@ -521,6 +513,8 @@ def parse_args():
 	parser.add_argument('--MAF', type=float, default=0.45,
 		help='Average MAF of the SNP set for '
 		+ 'opposing homozygotes counts estimations.')
+	parser.add_argument('--compute-MAF', action='store_true',
+		help='Compute MAF')
 	parser.add_argument('--gt-separator',
 		help='Symbol separating alleles in genotype, none by default.')
 	parser.add_argument('--separator', default='\t',
