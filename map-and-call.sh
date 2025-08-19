@@ -12,11 +12,11 @@ MEM="4G" # Max memory per thread for samtools sort
 #Download reference and create index if not exist
 if [[ ! -f  $REF_12X ]]; then
 	wget $REF_URL
-	which pigz && pigz -d ${REF_12X}.gz || gunzip ${REF_12X}.gz
+	gunzip ${REF_12X}.gz
 fi
 
 if [[ ! -f  12x_index.1.bt2 ]]; then
-	bowtie2-build --threads $THREADS -q $REF_12X.head 12x_index && echo "Reference indexed"
+	bowtie2-build --threads $THREADS -q $REF_12X 12x_index && echo "Reference indexed"
 fi
 
 #Map reads, process mapping file with SAMtools
@@ -27,4 +27,5 @@ samtools sort -@ $THREADS -m 4G -o $PREFIX.bam && samtools index $PREFIX.bam
 #BCFtools mpileup and call SNPs
 bcftools mpileup -f $REF_12X -Q 18 --regions-file $REGIONS --max-depth 500 -O u -o $PREFIX.mpileup.bcf $PREFIX.bam
 bcftools call -O v -o $PREFIX.calls.vcf -V indels -m $PREFIX.mpileup.bcf
-bcftools query -f '%CHROM\t%POS\t%REF\t%ALT[\t%TGT]\n' $PREFIX.calls.vcf > $PREFIX.GT.tsv
+grep "#CHROM" $PREFIX.calls.vcf | cut -f 2,10- | sed 's/\.bam//g' > $PREFIX.GT.tsv
+bcftools query -f '%POS[\t%TGT]\n' $PREFIX.calls.vcf >> $PREFIX.GT.tsv
