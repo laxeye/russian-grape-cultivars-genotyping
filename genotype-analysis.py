@@ -7,6 +7,7 @@ import seaborn
 import sys
 import matplotlib.pyplot as plt
 import numpy as np
+import sqlite3
 from math import sqrt
 from scipy.spatial.distance import squareform
 from scipy.cluster.hierarchy import dendrogram, linkage
@@ -32,16 +33,31 @@ def makeIntSeries(series):
 	return [d.get(x, pandas.NA) for x in series.values]
 
 
-def makeIntDF(df, args):
+def read_gt_table(args):
+	if args.no_transpose:
+		df = pandas.read_table(args.input, sep=args.separator, index_col=0, header=None)
+	else:
+		df = pandas.read_table(args.input, sep=args.separator, index_col=0).T
+
+	if args.subsample:
+		df = df.iloc[0:args.subsample + args.shift, :]
+
+	if args.gt_separator:
+		df = df.replace(to_replace=args.gt_separator, value='', regex=True)
+
+	df.columns = list(map(str, df.columns))
+
+	return df
+
+
+def df_gt_to_int(df):
 	logger = logging.getLogger("main")
 	logger.info('Converting genotypes to integer data.')
-	if args.transpose:
-		dfInt = df.iloc[args.shift:, :].apply(makeIntSeries)
-	else:
-		dfInt = df.iloc[:, args.shift:].apply(makeIntSeries)
-	dfInt.index = list(map(lambda x: x.replace('.', '_'), dfInt.index))
-	#dfInt.index = list(map(lambda x: x.replace(' ', '_'), dfInt.index))
-	return dfInt
+	df_int = df.iloc[args.shift:, :].apply(makeIntSeries)
+	df_int.index = list(map(lambda x: x.replace('.', '_'), df_int.index))
+	df_int.to_csv("%s.int.csv" % args.prefix)
+
+	return df_int
 
 
 def predGT(a, b):
@@ -150,18 +166,18 @@ def countOpposite(a, b):
 	return ophz, hz
 
 
-def opposite(dfInt, dfDist, min_dist=0.05, min_loci=20):
+def opposite(df_int, df_dist, min_dist=0.05, min_loci=20):
 	def check_dist(a, b):
-		return dfDist.query('First == @a & Second == @b')['IBSdist'].values[0]
+		return df_dist.query('First == @a & Second == @b')['IBSdist'].values[0]
 
 	logger = logging.getLogger('main')
 	logger.info('Calculating opposing homozygotes for all possible pairs.')
 	opps = []
-	for i in dfInt.index:
-		for j in dfInt.index:
+	for i in df_int.index:
+		for j in df_int.index:
 			if i > j:
 				if check_dist(i, j) > min_dist:
-					ophz, hz = countOpposite(dfInt.loc[i], dfInt.loc[j])
+					ophz, hz = countOpposite(df_int.loc[i], df_int.loc[j])
 					if hz > min_loci:
 						opps.append([i, j, ophz, hz])
 				else:
@@ -169,6 +185,30 @@ def opposite(dfInt, dfDist, min_dist=0.05, min_loci=20):
 	return pandas.DataFrame.from_records(
 		opps, columns=['First', 'Second', 'OH', 'loci']
 		).sort_values('OH')
+
+
+def opposite_from_db(sqlcon, df_int, df_dist, min_dist=0.05, min_loci=20):
+	def check_dist(a, b):
+		return df_dist.query('First == @a & Second == @b')['IBSdist'].values[0]
+
+	logger = logging.getLogger('main')
+	logger.info('Calculating opposing homozygotes for new pairs.')
+	df_oh_fromdb = pandas.read_sql_query(
+		"SELECT * FROM OH", sqlcon, index_col='index')
+	opps = []
+	for i in df_int.index:
+		for j in df_int.index:
+			if i > j:
+				if check_dist(i, j) > min_dist:
+					ophz, hz = countOpposite(df_int.loc[i], df_int.loc[j])
+					if hz > min_loci:
+						opps.append([i, j, ophz, hz])
+				else:
+					logger.debug(f"{i} and {j} are too close, skipping.")
+	opposite_new = pandas.DataFrame.from_records(
+		opps, columns=['First', 'Second', 'OH', 'loci']
+		)
+	return pandas.concat([df_oh_fromdb, opposite_new]).sort_values('OH')
 
 
 def calcOppNA(dfPred, dfOrf):
@@ -204,6 +244,25 @@ def IBSDist(df):
 	return pandas.DataFrame.from_records(dists, columns=['First', 'Second', 'IBSdist']).sort_values('IBSdist')
 
 
+def IBSDist_DB(df_dist_fromdb, df_int):
+	dists = []
+	xs = set(df_dist_fromdb['First'].values)
+	ys = set(df_dist_fromdb['Second'].values)
+	for x in df_int.index:
+		a = df_int.loc[x]
+		for y in df_int.index:
+			if x > y:
+				if x not in xs or y not in ys or df_dist_fromdb.query("First == @x and Second == @y").empty:
+					b = df_int.loc[y]
+					nna = pandas.notna(a) & pandas.notna(b)
+					dists.append([
+						x,
+						y,
+						sum(abs(a[nna].values - b[nna].values)) / (2 * len(a[nna]))
+					])
+	return pandas.DataFrame.from_records(dists, columns=['First', 'Second', 'IBSdist'])
+
+
 def NeiDaDist(df):
 	'''Return Nei's Da distances between all samples as a dataframe'''
 	logger = logging.getLogger('main')
@@ -223,7 +282,7 @@ def NeiDaDist(df):
 	return pandas.DataFrame.from_records(dists, columns=['First', 'Second', 'NeiDa']).sort_values('NeiDa')
 
 
-def triosFromDuos(dfInt, dfDuo):
+def triosFromDuos(df_int, dfDuo):
 	'''Return all possible trios and predicted progeny genoypes'''
 	logger = logging.getLogger('main')
 	logger.info('Predicting parents-offspring trios.')
@@ -233,12 +292,12 @@ def triosFromDuos(dfInt, dfDuo):
 		ops = list(dfDuo[dfDuo['First'] == x]['Second'].values) + list(dfDuo[dfDuo['Second'] == x]['First'].values)
 		if len(ops) < 2:
 			continue
-		testProg = dfInt.loc[x]
+		testProg = df_int.loc[x]
 		for y in ops:
 			for z in ops:
 				if y < z or (y == z and not args.no_self):
 					predProg = pandas.Series([predGT(a, b) for a, b in zip(
-							dfInt.loc[y].values, dfInt.loc[z].values
+							df_int.loc[y].values, df_int.loc[z].values
 						)],
 						index=testProg.index
 					)
@@ -310,24 +369,24 @@ def create_plink_ped(df):
 	df_ped.to_csv(f"{args.prefix}.ped", sep=' ', header=False)
 
 
-def filter_duo(dfDuo, dfDist):
+def filter_duo(dfDuo, df_dist):
 	idx = []
 	for x in dfDuo.index:
 		f, s = dfDuo.loc[x][['First', 'Second']].values
-		dist = dfDist.query('First == @f & Second == @s')['IBSdist'].values
+		dist = df_dist.query('First == @f & Second == @s')['IBSdist'].values
 		if dist < 0.05:
 			idx.append(x)
 	return dfDuo.drop(idx)
 
 
-def tnse_viz(dfDistP):
+def tnse_viz(df_dist_pvt):
 	# Set perplexity parameter here:
 	perplexity = args.perplexity
 
-	x = dfDistP.transpose().to_numpy()
+	x = df_dist_pvt.transpose().to_numpy()
 	x = x[~np.isnan(x)]
 	dist_sq = squareform(x, checks=True)
-	labels = list(dfDistP.columns) + [dfDistP.index[-1]]
+	labels = list(df_dist_pvt.columns) + [df_dist_pvt.index[-1]]
 	dfSQ = pandas.DataFrame(dist_sq, columns=labels, index=labels)
 
 	dfMeta = pandas.read_table(args.metadata)
@@ -356,60 +415,83 @@ def main():
 	out_dir = os.path.dirname(args.input)
 	logger = create_logger()
 	logger.info("Analysis started")
+	table_names = []
 
-	if args.transpose:
-		df = pandas.read_table(args.input, sep=args.separator, index_col=0).T
-	else:
-		df = pandas.read_table(args.input, sep=args.separator, index_col=0, header=None)
+	if args.sqlite3db:
+		sqlcon = sqlite3.connect("%s.db" % args.sqlite3db)
+		table_names = pandas.read_sql_query(
+			"SELECT name FROM sqlite_master WHERE type='table'", sqlcon
+			)['name'].values
 
-	if args.subsample:
-		df = df.iloc[0:args.subsample + args.shift, :]
 
-	if args.gt_separator:
-		df = df.replace(to_replace=args.gt_separator, value='', regex=True)
+	df_gt = read_gt_table(args)
+	if args.sqlite3db:
+		# Look for GT table in DB
+		if 'GT' in table_names:
+			df_gt_fromdb = pandas.read_sql_query(
+				"SELECT * FROM GT", sqlcon, index_col='index')
+			df_gt = pandas.concat([df_gt_fromdb, df_gt]).drop_duplicates(keep='last')
 
-	dfInt = makeIntDF(df, args)
-	dfInt.to_csv("%s.int.csv" % args.prefix)
+		df_gt.to_sql(name='GT', con=sqlcon, if_exists='replace')
+
+	df_int = df_gt_to_int(df_gt)
+
+	if args.sqlite3db:
+		df_int.to_sql(name='Int', con=sqlcon, if_exists='replace')
 
 	if args.create_plink:
-		create_plink_ped(dfInt)
+		create_plink_ped(df_int)
 
-	# Calculate IBS distance
-	dfDist = IBSDist(dfInt)
-	dfDist.to_csv("%s.IBSdist.csv" % args.prefix, index=None)
-	dfDistP = pandas.pivot(dfDist, index='First', columns='Second', values='IBSdist')
-	dfDistP.to_csv("%s.IBSdist.pivot.csv" % args.prefix)
+	# Look for IBS distance in DB
+	if args.sqlite3db and 'IBS' in table_names:
+		df_dist_fromdb = pandas.read_sql_query(
+			"SELECT * FROM IBS", sqlcon, index_col='index')
+		df_dist_new = IBSDist_DB(df_dist_fromdb, df_int)
+		df_dist = pandas.concat([df_dist_fromdb, df_dist_new]).sort_values('IBSdist')
+	else:
+		df_dist = IBSDist(df_int)
+	
+	df_dist.to_csv("%s.IBSdist.csv" % args.prefix, index=None)
+
+	if args.sqlite3db:
+		df_dist.to_sql(name='IBS', con=sqlcon, if_exists='replace')
+
+	df_dist_pvt = pandas.pivot(df_dist, index='First', columns='Second', values='IBSdist')
+	df_dist_pvt.to_csv("%s.IBSdist.pivot.csv" % args.prefix)
 
 	# Find possible duplicates
-	dfDupes = dfDist[dfDist['IBSdist'] < args.dup_threshold]
-	if len(dfDupes) > 0:
-		dfDupes.to_csv("%s.duplicates.csv" % args.prefix, index=None)
-		logger.info("%s duplicates found.", len(dfDupes))
-		dfIntNR = dfInt.drop(labels=dfDupes['First'])
+	df_duplicates = df_dist[df_dist['IBSdist'] < args.dup_threshold]
+	if len(df_duplicates) > 0:
+		df_duplicates.to_csv("%s.duplicates.csv" % args.prefix, index=None)
+		logger.info("%s duplicates found.", len(df_duplicates))
+		df_int_nr = df_int.drop(labels=df_duplicates['First'])
 	else:
 		logger.info("No duplicates found.")
-		dfIntNR = dfInt
+		df_int_nr = df_int
 
 	# Calculate Nei's DA distance
+	dfNeiP = None
 	if args.nei_distance:
-		dfP = 0.5 - dfInt / 2
+		dfP = 0.5 - df_int / 2
 		dfNei = NeiDaDist(dfP)
 		dfNei.to_csv("%s.NeiDa.csv" % args.prefix, index=None)
 		dfNeiP = pandas.pivot(dfNei, index='First', columns='Second', values='NeiDa')
 		dfNeiP.to_csv("%s.NeiDa.pivot.csv" % args.prefix)
-	else:
-		dfNeiP = None
 
 	if args.tsne:
-		tnse_viz((dfDistP, dfNeiP)[args.nei_distance])
+		tnse_viz((df_dist_pvt, dfNeiP)[args.nei_distance])
 
 	# Plot dendrograms
 	if args.plot_dendrograms:
-		dendro(args, (dfDistP, dfNeiP)[args.nei_distance])
+		dendro(args, (df_dist_pvt, dfNeiP)[args.nei_distance])
 
 	# Calculate IBD / opposing homozygotes
-	dfOpp = opposite(dfIntNR, dfDist)
-	dfOpp['Err_rate'] = dfOpp['OH']/dfOpp['loci']
+	if args.sqlite3db and 'OH' in table_names:
+		df_OH = opposite_from_db(sqlcon, df_int_nr, df_dist)
+	else:
+		dfOpp = opposite(df_int_nr, df_dist)
+		dfOpp['Err_rate'] = dfOpp['OH']/dfOpp['loci']
+	
 	dfOpp = dfOpp.sort_values('Err_rate')
 	dfOpp.to_csv("%s.OH.csv" % args.prefix, index=None)
 	seaborn.histplot(data=dfOpp, x='OH', binwidth=1)
@@ -418,13 +500,13 @@ def main():
 
 	# Calculate mean MAF if not specified by user
 	if args.compute_MAF:
-		args.MAF = np.mean((1 - abs(dfIntNR.mean())) / 2)
+		args.MAF = np.mean((1 - abs(df_int_nr.mean())) / 2)
 		logger.info(
 		"Minor allele frequency (MAF): %s",
 		round(args.MAF, 2)
 		)
 
-	snpN = len(dfIntNR.columns)
+	snpN = len(df_int_nr.columns)
 	halfsiblingOH = 0.5 * snpN * args.MAF ** 2 * (1 - args.MAF) ** 2
 	logger.info(
 		"Predicted opposing homozygotes count for halfsiblings: %s",
@@ -439,12 +521,12 @@ def main():
 		round(OHthreshold, 2)
 		)
 	dfDuo = dfOpp.query('OH <= @OHthreshold').copy()
-	dfDuo = filter_duo(dfDuo, dfDist)
+	dfDuo = filter_duo(dfDuo, df_dist)
 	dfDuo['Orient'] = pandas.NA
 	logger.info("Parent-Offspring pairs found: %s", len(dfDuo))
 
 	if len(dfDuo.index) > 1:
-		dfTrio, dfPPGT = triosFromDuos(dfIntNR, dfDuo)
+		dfTrio, dfPPGT = triosFromDuos(df_int_nr, dfDuo)
 		dfTrio = dfTrio.drop_duplicates(subset=['Offspring'], keep='first')
 		shortHeader = ['Offspring', 'Parent1', 'Parent2', 'Gdist', 'snpN', 'snpDiff']
 		dfTrio[shortHeader].to_csv("%s.trios.all.csv" % args.prefix, index=None)
@@ -481,21 +563,24 @@ def main():
 	if args.predict:
 		# Predict all possible progeny
 		logger.info("Calculating all possible progeny")
-		dfAllPP = predictOffs(dfIntNR)
+		dfAllPP = predictOffs(df_int_nr)
 		dfAllPP.to_csv("%s.PPall.GT.csv" % args.prefix)
 		logger.info("Possible progeny calculated and written.")
 
 		# Drop known offsprings
-		dfIntMissingParentage = dfIntNR.drop(
+		df_intMissingParentage = df_int_nr.drop(
 			labels=dfTrioGood['Offspring'].values, axis='index'
 			)
 
 		# Calculate OH between predicted progeny and orphans
 		logger.info("Calculating OH between predicted progeny and orphans.")
-		dfOpp2 = calcOppNA(dfAllPP, dfIntMissingParentage)
+		dfOpp2 = calcOppNA(dfAllPP, df_intMissingParentage)
 		dfOpp2[dfOpp2['OH'] <= 5].to_csv(
 			"%s.OH.withPredicted.csv" % args.prefix, index=None
 			)
+
+	if args.sqlite3db:
+		sqlcon.close()
 
 	logger.info("Analysis finished.")
 
@@ -504,31 +589,35 @@ def parse_args():
 	parser = argparse.ArgumentParser(description='Genome statistics')
 	parser.add_argument('-i', '--input', required=True,
 		help='Input TSV file with genotypes.')
+	parser.add_argument('-p', '--prefix',
+		help='Output prefix.')
+	parser.add_argument('-S', '--sqlite3db',
+		help='SQLite3 DB to store results and look for previously calculated data.')
+	parser.add_argument('-u', '--update', action='store_true',
+		help='Update data in SQLite3 DB from input GT table.')
 	parser.add_argument('-N', '--subsample', type=int,
-		help='Subsample size.')
+		help='Use only first N samples.')
 	parser.add_argument('--no-self', action='store_true',
 		help='Do not produce offspring from identical parents.')
-	parser.add_argument('--transpose', action='store_true',
-		help='To transpose initial data.')
+	parser.add_argument('--no-transpose', action='store_true',
+		help='Do not transpose initial GT data (Each sample already forms a row).')
 	parser.add_argument('--MAF', type=float, default=0.45,
 		help='Average MAF of the SNP set for '
 		+ 'opposing homozygotes counts estimations.')
 	parser.add_argument('--compute-MAF', action='store_true',
-		help='Compute MAF')
+		help='Compute MAF (minor allele frequency).')
 	parser.add_argument('--gt-separator',
 		help='Symbol separating alleles in genotype, none by default.')
 	parser.add_argument('--separator', default='\t',
 		help='Symbol separating values in the table. Default: tab')
-	parser.add_argument('--shift', type=int, default=1,
-		help='Count of columns with meta-data, preceding genotypes.')
+	parser.add_argument('--shift', type=int, default=0,
+		help='Columns with no genotypes excluding sample ID, default: 0.')
 	parser.add_argument('--predict', action='store_true',
 		help='Predict intermediates.')
 	parser.add_argument('--create-plink', action='store_true',
 		help='Create ped-file (PLINK pedigry and genotype text file).')
 	parser.add_argument('-d', '--plot-dendrograms', action='store_true',
 		help='Plot dendrograms.')
-	parser.add_argument('-p', '--prefix',
-		help='Output prefix.')
 	parser.add_argument('--dup-threshold', type=float, default=0.01,
 		help='Threshold for duplicate removal, default 0.01.')
 	parser.add_argument('--tsne', action='store_true',
