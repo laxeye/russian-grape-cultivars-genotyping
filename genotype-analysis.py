@@ -4,7 +4,6 @@ import logging
 import os
 import pandas
 import seaborn
-import sys
 import matplotlib.pyplot as plt
 import numpy as np
 import sqlite3
@@ -61,7 +60,7 @@ def df_gt_to_int(df):
 
 
 def predGT(a, b):
-	if(
+	if (
 		a is pandas.NA
 		or b is pandas.NA
 		or a is None
@@ -255,11 +254,8 @@ def IBSDist_DB(df_dist_fromdb, df_int):
 				if x not in xs or y not in ys or df_dist_fromdb.query("First == @x and Second == @y").empty:
 					b = df_int.loc[y]
 					nna = pandas.notna(a) & pandas.notna(b)
-					dists.append([
-						x,
-						y,
-						sum(abs(a[nna].values - b[nna].values)) / (2 * len(a[nna]))
-					])
+					dist = sum(abs(a[nna].values - b[nna].values)) / (2 * len(a[nna]))
+					dists.append([x, y, dist])
 	return pandas.DataFrame.from_records(dists, columns=['First', 'Second', 'IBSdist'])
 
 
@@ -274,11 +270,8 @@ def NeiDaDist(df):
 			if x > y:
 				b = df.loc[y]
 				nna = pandas.notna(a) & pandas.notna(b)
-				dists.append([
-					x,
-					y,
-					1 - sum((a[nna] * b[nna]).map(sqrt) + ( (1 - a[nna]) * (1 - b[nna]) ).map(sqrt)) / len(a[nna])
-					])
+				dist = 1 - sum((a[nna] * b[nna]).map(sqrt) + ( (1 - a[nna]) * (1 - b[nna]) ).map(sqrt)) / len(a[nna])
+				dists.append([x, y, dist])
 	return pandas.DataFrame.from_records(dists, columns=['First', 'Second', 'NeiDa']).sort_values('NeiDa')
 
 
@@ -296,13 +289,14 @@ def triosFromDuos(df_int, dfDuo):
 		for y in ops:
 			for z in ops:
 				if y < z or (y == z and not args.no_self):
-					predProg = pandas.Series([predGT(a, b) for a, b in zip(
+					predProg = pandas.Series(
+						[predGT(a, b) for a, b in zip(
 							df_int.loc[y].values, df_int.loc[z].values
 						)],
 						index=testProg.index
 					)
 					nna = predProg.notna() & testProg.notna()
-					diff = sum([0 if(a == b) else 1 for a, b in zip(
+					diff = sum([0 if (a == b) else 1 for a, b in zip(
 						predProg[nna].values, testProg[nna].values
 					)])
 					snpN = len(predProg[nna])
@@ -412,7 +406,6 @@ def tnse_viz(df_dist_pvt):
 def main():
 	global args
 	args = parse_args()
-	out_dir = os.path.dirname(args.input)
 	logger = create_logger()
 	logger.info("Analysis started")
 	table_names = []
@@ -422,7 +415,6 @@ def main():
 		table_names = pandas.read_sql_query(
 			"SELECT name FROM sqlite_master WHERE type='table'", sqlcon
 			)['name'].values
-
 
 	df_gt = read_gt_table(args)
 	if args.sqlite3db:
@@ -463,7 +455,7 @@ def main():
 	df_duplicates = df_dist[df_dist['IBSdist'] < args.dup_threshold]
 	if len(df_duplicates) > 0:
 		df_duplicates.to_csv("%s.duplicates.csv" % args.prefix, index=None)
-		logger.info("%s duplicates found.", len(df_duplicates))
+		logger.info("%s duplicate pairs found.", len(df_duplicates))
 		df_int_nr = df_int.drop(labels=df_duplicates['First'])
 	else:
 		logger.info("No duplicates found.")
@@ -502,8 +494,8 @@ def main():
 	if args.compute_MAF:
 		args.MAF = np.mean((1 - abs(df_int_nr.mean())) / 2)
 		logger.info(
-		"Minor allele frequency (MAF): %s",
-		round(args.MAF, 2)
+			"Minor allele frequency (MAF): %s",
+			round(args.MAF, 2)
 		)
 
 	snpN = len(df_int_nr.columns)
