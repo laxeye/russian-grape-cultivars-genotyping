@@ -28,4 +28,4 @@ samtools sort -@ $THREADS -m 4G -o $PREFIX.bam && samtools index $PREFIX.bam
 bcftools mpileup -f $REF_12X -Q 18 --regions-file $REGIONS --max-depth 500 -O u -o $PREFIX.mpileup.bcf $PREFIX.bam
 bcftools call -O v -o $PREFIX.calls.vcf -V indels -m $PREFIX.mpileup.bcf
 grep "#CHROM" $PREFIX.calls.vcf | cut -f 2,10- | sed 's/\.bam//g' > $PREFIX.GT.tsv
-bcftools query -f '%POS[\t%TGT]\n' $PREFIX.calls.vcf >> $PREFIX.GT.tsv
+bcftools query -f '%POS[\t%TGT]\n' $PREFIX.calls.vcf | sed 's/\///g' >> $PREFIX.GT.tsv
